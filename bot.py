@@ -54,41 +54,45 @@ def obtener_crumb():
         return None
 
 def descargar_datos(simbolo, crumb=None):
-    try:
-        ahora = int(time.time())
-        inicio = ahora - (90 * 24 * 3600)
-        h = {"User-Agent": random.choice(USER_AGENTS),
-             "Accept": "application/json,*/*",
-             "Accept-Language": "en-US,en;q=0.9",
-             "Referer": f"https://finance.yahoo.com/quote/{simbolo}"}
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{simbolo}"
-               f"?period1={inicio}&period2={ahora}&interval=1d&includeAdjustedClose=true")
-        if crumb:
-            url += f"&crumb={crumb}"
-        resp = SESSION.get(url, headers=h, timeout=20)
-        if resp.status_code != 200 or not resp.text.strip():
-            url2 = (f"https://query2.finance.yahoo.com/v8/finance/chart/{simbolo}"
-                    f"?period1={inicio}&period2={ahora}&interval=1d")
-            resp = SESSION.get(url2, headers=h, timeout=20)
-        if not resp.text.strip():
-            return None
-        data = resp.json()
-        result = data.get("chart", {}).get("result", [])
-        if not result:
-            return None
-        r      = result[0]
-        ts     = r.get("timestamp", [])
-        closes = r.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose", [])
-        vols   = r.get("indicators", {}).get("quote", [{}])[0].get("volume", [])
-        if not ts or not closes:
-            return None
-        df = pd.DataFrame({"timestamp": ts, "Close": closes,
-                           "Volume": vols if vols else [None]*len(ts)}).dropna(subset=["Close"])
-        df["Date"] = pd.to_datetime(df["timestamp"], unit="s")
-        return df.set_index("Date").sort_index()
-    except Exception as e:
-        print(f"    error: {e}")
-        return None
+    """Descarga con 3 reintentos y 2 servidores alternativos."""
+    ahora  = int(time.time())
+    inicio = ahora - (90 * 24 * 3600)
+    servidores = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]
+    for intento in range(3):
+        try:
+            h = {"User-Agent": random.choice(USER_AGENTS),
+                 "Accept": "application/json,*/*",
+                 "Accept-Language": "en-US,en;q=0.9",
+                 "Referer": f"https://finance.yahoo.com/quote/{simbolo}"}
+            servidor = servidores[intento % 2]
+            url = (f"https://{servidor}/v8/finance/chart/{simbolo}"
+                   f"?period1={inicio}&period2={ahora}&interval=1d&includeAdjustedClose=true")
+            if crumb:
+                url += f"&crumb={crumb}"
+            resp = SESSION.get(url, headers=h, timeout=25)
+            if not resp.text.strip() or resp.status_code != 200:
+                time.sleep(3)
+                continue
+            data   = resp.json()
+            result = data.get("chart", {}).get("result", [])
+            if not result:
+                time.sleep(3)
+                continue
+            r      = result[0]
+            ts     = r.get("timestamp", [])
+            closes = r.get("indicators", {}).get("adjclose", [{}])[0].get("adjclose", [])
+            vols   = r.get("indicators", {}).get("quote", [{}])[0].get("volume", [])
+            if not ts or not closes:
+                continue
+            df = pd.DataFrame({"timestamp": ts, "Close": closes,
+                               "Volume": vols if vols else [None]*len(ts)}).dropna(subset=["Close"])
+            df["Date"] = pd.to_datetime(df["timestamp"], unit="s")
+            return df.set_index("Date").sort_index()
+        except Exception as e:
+            if intento < 2:
+                time.sleep(4 + intento * 2)
+            continue
+    return None
 
 def calcular_rsi(serie, periodos=14):
     delta    = serie.diff()
@@ -169,7 +173,10 @@ def enviar_correo(resultados):
         texto = "\n".join([f"{r['simbolo']}: ${r['precio']:,.4f} ({r['cambio_dia']:+.2f}%)" for r in resultados])
         msg.attach(MIMEText(texto, "plain"))
         msg.attach(MIMEText(construir_html(resultados), "html"))
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
             s.login(EMAIL_REMITENTE, EMAIL_CONTRASENA)
             s.sendmail(EMAIL_REMITENTE, EMAIL_DESTINO, msg.as_string())
         print(f"  ✅ Correo enviado — {len(resultados)} alerta(s)")
