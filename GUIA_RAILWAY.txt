@@ -1,0 +1,181 @@
+╔══════════════════════════════════════════════════════════════════╗
+║    GUÍA PASO A PASO — SUBIR BOT A RAILWAY (24/7 GRATIS)         ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Con esta guía tu bot va a correr SOLO en internet, sin que enciendas
+nada. Solo necesitás hacer esto UNA VEZ.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PASO 1 — CREAR REPOSITORIO EN GITHUB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Entrá a https://github.com e iniciá sesión
+
+2. Hacé clic en el botón verde "New" (arriba a la izquierda)
+
+3. Completá así:
+   • Repository name: trading-bot-alertas
+   • Descripción: Bot de alertas de trading
+   • Privado: ✅ (marcá "Private" — para que nadie vea tu email)
+   • Clic en "Create repository"
+
+4. En la página del repo vacío, hacé clic en "uploading an existing file"
+
+5. Arrastrá estos 4 archivos al área de carga:
+   ✅ bot.py
+   ✅ requirements.txt
+   ✅ Procfile
+   ✅ runtime.txt
+
+6. Abajo escribí: "Subida inicial del bot"
+   Clic en "Commit changes"
+
+¡Tu código ya está en GitHub!
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PASO 2 — CONFIGURAR TU GMAIL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Necesitás una "Contraseña de Aplicación" especial de Gmail.
+(No uses tu contraseña normal — no funciona por seguridad)
+
+2.1  Activar verificación en 2 pasos:
+     → https://myaccount.google.com/security
+     → Buscá "Verificación en 2 pasos" → Activala
+
+2.2  Crear Contraseña de App:
+     → https://myaccount.google.com/apppasswords
+     → Seleccionar app: "Correo"
+     → Seleccionar dispositivo: "Otra" → escribí "TradingBot"
+     → Clic "Generar"
+     → Copiá la clave de 16 letras: xxxx xxxx xxxx xxxx
+     → GUARDALA, la necesitás en el Paso 3
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PASO 3 — CREAR CUENTA EN RAILWAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Entrá a https://railway.app
+
+2. Clic en "Start a New Project"
+
+3. Clic en "Login with GitHub" → Autorizá Railway
+
+4. Clic en "Deploy from GitHub repo"
+
+5. Buscá y seleccioná: trading-bot-alertas
+
+6. Railway va a detectar automáticamente que es Python ✅
+
+7. Clic en "Deploy Now"
+   (Va a tardar 1-2 minutos en instalar las librerías)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PASO 4 — AGREGAR TUS DATOS SECRETOS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ MUY IMPORTANTE: No pongas tu email ni contraseña en el código.
+   Railway tiene un lugar seguro para guardarlos.
+
+1. En Railway, clic en tu proyecto → clic en "Variables"
+
+2. Agregá estas variables una por una
+   (clic en "+ New Variable" para cada una):
+
+   ┌─────────────────────┬──────────────────────────────────┐
+   │ VARIABLE            │ VALOR                            │
+   ├─────────────────────┼──────────────────────────────────┤
+   │ EMAIL_REMITENTE     │ tu_correo@gmail.com              │
+   │ EMAIL_CONTRASENA    │ xxxx xxxx xxxx xxxx (del paso 2) │
+   │ EMAIL_DESTINO       │ tu_correo@gmail.com              │
+   │ INTERVALO_MINUTOS   │ 30                               │
+   │ CAMBIO_PRECIO_PCT   │ 2.0                              │
+   │ RSI_SOBREVENDIDO    │ 30                               │
+   │ RSI_SOBRECOMPRADO   │ 70                               │
+   └─────────────────────┴──────────────────────────────────┘
+
+3. Después de agregar todas, clic en "Deploy" para reiniciar
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PASO 5 — VERIFICAR QUE FUNCIONA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. En Railway, clic en tu proyecto → clic en "Logs"
+
+2. Deberías ver algo así:
+   ╔══════════════════════════════════════════╗
+   ║   🤖 BOT DE TRADING INICIADO EN RAILWAY  ║
+   ╚══════════════════════════════════════════╝
+     AAPL... ✅
+     BTC-USD... ⚠️ 1 señal(es)
+     ETH-USD... ✅
+     ...
+     📊 2/16 con señales
+     ✅ Correo enviado
+
+3. Revisá tu Gmail (también la carpeta SPAM la primera vez)
+
+¡Si ves los logs y llega el correo, el bot está funcionando! 🎉
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ¿CÓMO AGREGAR O QUITAR ACTIVOS?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Entrá a tu repo en GitHub
+2. Clic en bot.py → clic en el ícono del lápiz (editar)
+3. Buscá la lista ACTIVOS y agregá o quitá símbolos
+4. Clic "Commit changes"
+5. Railway detecta el cambio y reinicia automáticamente ✅
+
+Símbolos válidos (buscar en finance.yahoo.com):
+• Acciones:  AAPL, NVDA, TSLA, MSFT, META, AMZN
+• Crypto:    BTC-USD, ETH-USD, SOL-USD, BNB-USD
+• Forex:     EURUSD=X, GBPUSD=X, USDJPY=X
+• ETFs:      VTI, VOO, SPY, QQQ
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ¿CUÁNTO CUESTA?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Railway Plan Gratuito:
+✅ 500 horas/mes gratis
+✅ Suficiente para correr el bot TODO EL MES
+✅ No necesita tarjeta de crédito para empezar
+⚠️  Si querés más de 500 horas, el plan pago es ~$5/mes
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ PROBLEMAS COMUNES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+❌ "Authentication Error" en los logs
+→ La contraseña de App de Gmail está mal
+→ Verificá que copiaste los 16 caracteres correctamente
+
+❌ No llega el correo
+→ Revisá la carpeta SPAM
+→ Verificá que EMAIL_DESTINO esté bien escrito en Railway
+
+❌ El bot se detiene solo
+→ Revisá los logs en Railway para ver el error
+→ Puede ser que una librería falló — escribíme y lo resolvemos
+
+❌ "Module not found" en los logs
+→ Verificá que subiste requirements.txt a GitHub
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ⚠️  RECORDATORIO IMPORTANTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Las alertas son señales técnicas, NO garantía de ganancias.
+Siempre analizá el contexto antes de abrir una operación.
+Nunca inviertas dinero que no podés permitirte perder.
+
+══════════════════════════════════════════════════════════════════
