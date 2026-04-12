@@ -217,3 +217,4 @@ if __name__ == "__main__":
     while True:
         time.sleep(INTERVALO_MIN * 60)
         revisar_mercados()
+        
