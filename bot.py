@@ -23,7 +23,7 @@ ACTIVOS = [
     "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL", "META",
     "BTC-USD", "ETH-USD", "SOL-USD",
     "EURUSD=X", "GBPUSD=X",
-    "GC=F", "SI=F",
+    "GC=F", "SI=F",  # Oro y Plata
     "VTI", "VOO", "BND", "SDY",
 ]
 
@@ -40,6 +40,57 @@ USER_AGENTS = [
 ]
 
 SESSION = requests.Session()
+
+# Nombres legibles para mostrar en el correo
+NOMBRES_DISPLAY = {
+    "GC=F":     "XAUUSD (Oro)",
+    "SI=F":     "XAGUSD (Plata)",
+    "BTC-USD":  "BTC/USD (Bitcoin)",
+    "ETH-USD":  "ETH/USD (Ethereum)",
+    "SOL-USD":  "SOL/USD (Solana)",
+    "EURUSD=X": "EUR/USD",
+    "GBPUSD=X": "GBP/USD",
+    "VTI":      "VTI (ETF Mercado Total)",
+    "VOO":      "VOO (ETF S&P 500)",
+    "BND":      "BND (ETF Bonos)",
+    "SDY":      "SDY (ETF Dividendos)",
+}
+
+def nombre_display(simbolo):
+    return NOMBRES_DISPLAY.get(simbolo, simbolo)
+
+def calcular_recomendacion(senales, rsi, ema_corta, ema_larga):
+    """Calcula una recomendacion final clara basada en todas las senales."""
+    puntos_compra = 0
+    puntos_venta  = 0
+    for s in senales:
+        peso = 2 if s["fuerza"] == "MUY FUERTE" else 1.5 if s["fuerza"] == "FUERTE" else 1
+        if "COMPRA" in s["accion"]:
+            puntos_compra += peso
+        elif "VENTA" in s["accion"]:
+            puntos_venta += peso
+    total = puntos_compra + puntos_venta
+    if total == 0:
+        return {"decision": "NEUTRAL", "color": "#888888",
+                "emoji": "⚪", "texto": "Sin señal clara — observar",
+                "consejo": "No hay suficientes indicadores para tomar decision."}
+    ratio_compra = puntos_compra / total
+    if ratio_compra >= 0.75:
+        return {"decision": "COMPRAR", "color": "#00B074",
+                "emoji": "✅", "texto": "SEÑAL DE COMPRA",
+                "consejo": f"Multiples indicadores apuntan al alza. RSI={rsi:.0f}. Considera abrir posicion LARGA."}
+    elif ratio_compra <= 0.25:
+        return {"decision": "VENDER", "color": "#E94560",
+                "emoji": "❌", "texto": "SEÑAL DE VENTA",
+                "consejo": f"Multiples indicadores apuntan a la baja. RSI={rsi:.0f}. Considera cerrar posicion o abrir CORTA."}
+    elif ratio_compra > 0.5:
+        return {"decision": "PROBABLE COMPRA", "color": "#F5A623",
+                "emoji": "⚡", "texto": "SEÑAL MIXTA — Tendencia a COMPRA",
+                "consejo": f"Mas indicadores de compra que venta. RSI={rsi:.0f}. Espera confirmacion antes de entrar."}
+    else:
+        return {"decision": "PROBABLE VENTA", "color": "#FF6B6B",
+                "emoji": "⚠️", "texto": "SEÑAL MIXTA — Tendencia a VENTA",
+                "consejo": f"Mas indicadores de venta que compra. RSI={rsi:.0f}. Protege tu capital con stop loss."}
 
 def obtener_crumb():
     try:
@@ -144,10 +195,12 @@ def analizar_activo(simbolo, crumb=None):
                                      "desc": f"Volumen {vol_actual/vol_promedio:.1f}x el promedio", "fuerza": "MEDIA"})
         if not senales:
             return None
-        return {"simbolo": simbolo, "precio": precio_actual, "cambio_dia": cambio_dia,
+        rec = calcular_recomendacion(senales, rsi_actual, float(ema_c.iloc[-1]), float(ema_l.iloc[-1]))
+        return {"simbolo": simbolo, "nombre": nombre_display(simbolo),
+                "precio": precio_actual, "cambio_dia": cambio_dia,
                 "cambio_7d": cambio_7d, "rsi": rsi_actual, "ema_corta": float(ema_c.iloc[-1]),
                 "ema_larga": float(ema_l.iloc[-1]), "senales": senales,
-                "hora": datetime.now().strftime("%d/%m/%Y %H:%M")}
+                "recomendacion": rec, "hora": datetime.now().strftime("%d/%m/%Y %H:%M")}
     except Exception as e:
         print(f"  ⚠️ Error en {simbolo}: {e}")
         return None
@@ -157,11 +210,46 @@ def construir_html(resultados):
     for r in resultados:
         color = "#00B074" if r["cambio_dia"] >= 0 else "#E94560"
         signo = "▲" if r["cambio_dia"] >= 0 else "▼"
+        rec   = r.get("recomendacion", {"decision":"NEUTRAL","color":"#888","emoji":"⚪","texto":"Sin señal","consejo":""})
+        nombre = r.get("nombre", r["simbolo"])
+
         bloques = ""
         for s in r["senales"]:
             bg = "#1a3a2a" if "COMPRA" in s["accion"] else "#3a1a1a" if "VENTA" in s["accion"] else "#1a2a3a"
-            bloques += f'<div style="background:{bg};border-radius:8px;padding:10px 14px;margin:6px 0;"><div style="font-size:15px;font-weight:bold;">{s["tipo"]}</div><div style="color:#F5A623;font-weight:bold;">{s["accion"]}</div><div style="color:#ccc;font-size:13px;">{s["desc"]}</div><span style="background:#0F3460;padding:2px 8px;border-radius:10px;font-size:11px;">Fuerza: {s["fuerza"]}</span></div>'
-        filas += f'<div style="background:#16213E;border-radius:12px;padding:20px;margin:16px 0;border-left:4px solid #F5A623;"><table width="100%"><tr><td><span style="font-size:22px;font-weight:bold;color:#fff;">{r["simbolo"]}</span><br><span style="color:#aaa;font-size:12px;">{r["hora"]}</span></td><td align="right"><span style="font-size:20px;font-weight:bold;color:#fff;">${r["precio"]:,.4f}</span><br><span style="color:{color};font-weight:bold;">{signo} {abs(r["cambio_dia"]):.2f}%</span></td></tr></table><table width="100%" style="margin:12px 0;background:#0F3460;border-radius:8px;"><tr><td style="color:#aaa;font-size:12px;padding:6px 10px;">RSI</td><td style="color:#aaa;font-size:12px;padding:6px 10px;">EMA{EMA_CORTA}</td><td style="color:#aaa;font-size:12px;padding:6px 10px;">EMA{EMA_LARGA}</td><td style="color:#aaa;font-size:12px;padding:6px 10px;">7d</td></tr><tr><td style="color:#F5A623;font-weight:bold;padding:6px 10px;">{r["rsi"]:.1f}</td><td style="color:#fff;padding:6px 10px;">${r["ema_corta"]:,.2f}</td><td style="color:#fff;padding:6px 10px;">${r["ema_larga"]:,.2f}</td><td style="color:{"#00B074" if r["cambio_7d"]>=0 else "#E94560"};padding:6px 10px;">{r["cambio_7d"]:+.2f}%</td></tr></table><b style="color:#F5A623;">🚨 SEÑALES:</b>{bloques}</div>'
+            bloques += (f'<div style="background:{bg};border-radius:8px;padding:10px 14px;margin:6px 0;">'
+                        f'<div style="font-size:14px;font-weight:bold;">{s["tipo"]}</div>'
+                        f'<div style="color:#F5A623;font-weight:bold;">{s["accion"]}</div>'
+                        f'<div style="color:#ccc;font-size:13px;">{s["desc"]}</div>'
+                        f'<span style="background:#0F3460;padding:2px 8px;border-radius:10px;font-size:11px;">Fuerza: {s["fuerza"]}</span></div>')
+
+        # Bloque de recomendacion final
+        rec_html = (f'<div style="background:{rec["color"]}22;border:2px solid {rec["color"]};'
+                    f'border-radius:12px;padding:16px;margin:12px 0;text-align:center;">'
+                    f'<div style="font-size:28px;margin-bottom:6px;">{rec["emoji"]}</div>'
+                    f'<div style="font-size:20px;font-weight:bold;color:{rec["color"]};">{rec["texto"]}</div>'
+                    f'<div style="color:#ccc;font-size:13px;margin-top:8px;">{rec["consejo"]}</div>'
+                    f'<div style="color:#555;font-size:11px;margin-top:8px;">⚠️ No es asesoría financiera — analizá siempre antes de operar</div>'
+                    f'</div>')
+
+        filas += (f'<div style="background:#16213E;border-radius:12px;padding:20px;margin:16px 0;border-left:4px solid {rec["color"]};">'
+                  f'<table width="100%"><tr>'
+                  f'<td><span style="font-size:20px;font-weight:bold;color:#fff;">{nombre}</span><br>'
+                  f'<span style="color:#aaa;font-size:11px;">{r["hora"]}</span></td>'
+                  f'<td align="right"><span style="font-size:20px;font-weight:bold;color:#fff;">${r["precio"]:,.4f}</span><br>'
+                  f'<span style="color:{color};font-weight:bold;">{signo} {abs(r["cambio_dia"]):.2f}% hoy</span></td>'
+                  f'</tr></table>'
+                  f'<table width="100%" style="margin:12px 0;background:#0F3460;border-radius:8px;">'
+                  f'<tr><td style="color:#aaa;font-size:12px;padding:6px 10px;">RSI</td>'
+                  f'<td style="color:#aaa;font-size:12px;padding:6px 10px;">EMA{EMA_CORTA}</td>'
+                  f'<td style="color:#aaa;font-size:12px;padding:6px 10px;">EMA{EMA_LARGA}</td>'
+                  f'<td style="color:#aaa;font-size:12px;padding:6px 10px;">7 dias</td></tr>'
+                  f'<tr><td style="color:#F5A623;font-weight:bold;padding:6px 10px;">{r["rsi"]:.1f}</td>'
+                  f'<td style="color:#fff;padding:6px 10px;">${r["ema_corta"]:,.2f}</td>'
+                  f'<td style="color:#fff;padding:6px 10px;">${r["ema_larga"]:,.2f}</td>'
+                  f'<td style="color:{"#00B074" if r["cambio_7d"]>=0 else "#E94560"};padding:6px 10px;">{r["cambio_7d"]:+.2f}%</td>'
+                  f'</tr></table>'
+                  f'{rec_html}'
+                  f'<b style="color:#F5A623;">📊 DETALLE DE SEÑALES:</b>{bloques}</div>')
     return f'<html><body style="margin:0;padding:0;background:#0D0D1A;font-family:Arial,sans-serif;color:#fff;"><div style="max-width:620px;margin:0 auto;padding:20px;"><div style="background:#1A1A2E;border-radius:16px;padding:24px;text-align:center;margin-bottom:20px;"><div style="font-size:32px;">📊</div><h1 style="margin:8px 0;font-size:22px;color:#F5A623;">ALERTA DE TRADING</h1><p style="color:#aaa;font-size:13px;">{len(resultados)} activo(s) con señales</p><p style="color:#555;font-size:11px;">⚠️ No es asesoría financiera.</p></div>{filas}<div style="text-align:center;color:#555;font-size:11px;padding:12px;border-top:1px solid #222;">Bot Railway 24/7 • Próxima revisión en {INTERVALO_MIN} min</div></div></body></html>'
 
 def enviar_correo(resultados):
@@ -217,4 +305,3 @@ if __name__ == "__main__":
     while True:
         time.sleep(INTERVALO_MIN * 60)
         revisar_mercados()
-        
