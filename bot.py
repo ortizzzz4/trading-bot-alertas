@@ -31,6 +31,132 @@ INTERVALOS_MERCADO = {
 
 _ultimo_chequeo = {}
 
+# ─────────────────────────────────────────────────────────────
+# GESTOR DE TRADES ACTIVOS
+# Guarda el estado de cada operacion abierta en memoria
+# Estructura: { "BTC-USD": { "direccion", "entrada", "sl", "tp", "hora", "senales" } }
+# ─────────────────────────────────────────────────────────────
+_trades_activos = {}
+
+def hay_trade_activo(sym):
+    return sym in _trades_activos
+
+def abrir_trade(sym, resultado):
+    """Guarda un trade nuevo como activo."""
+    _trades_activos[sym] = {
+        "direccion": resultado["direccion"],
+        "entrada":   resultado["niveles"]["entrada"],
+        "sl":        resultado["niveles"]["sl"],
+        "tp":        resultado["niveles"]["tp"],
+        "sl_pct":    resultado["niveles"]["sl_pct"],
+        "tp_pct":    resultado["niveles"]["tp_pct"],
+        "rr":        resultado["niveles"]["rr"],
+        "hora":      resultado["hora"],
+        "nombre":    resultado["nombre"],
+        "cat":       resultado["cat"],
+        "senales":   resultado["senales"],
+        "max_precio": resultado["niveles"]["entrada"],  # para trailing
+        "min_precio": resultado["niveles"]["entrada"],
+    }
+
+def cerrar_trade(sym):
+    """Elimina un trade activo."""
+    if sym in _trades_activos:
+        del _trades_activos[sym]
+
+def verificar_trades_activos(resultados_nuevos):
+    """
+    Para cada trade activo:
+    1. Verifica si el precio actual toco SL o TP
+    2. Verifica si la señal cambio de direccion
+    Retorna lista de eventos (cierres, cambios de direccion)
+    """
+    eventos = []
+    # Mapa rapido de precio actual por simbolo
+    precios = {r["sym"]: r["precio"] for r in resultados_nuevos}
+    # Tambien necesitamos precios de activos SIN señal nueva
+    syms_sin_precio = [s for s in list(_trades_activos.keys()) if s not in precios]
+
+    for sym in list(_trades_activos.keys()):
+        trade = _trades_activos[sym]
+        precio_actual = precios.get(sym)
+        if precio_actual is None:
+            continue
+
+        dir_trade = trade["direccion"]
+        entrada   = trade["entrada"]
+        sl        = trade["sl"]
+        tp        = trade["tp"]
+        ganancia_pct = ((precio_actual - entrada) / entrada * 100) if dir_trade == "COMPRA" else ((entrada - precio_actual) / entrada * 100)
+
+        # ── Verificar SL tocado ──
+        if dir_trade == "COMPRA" and precio_actual <= sl:
+            eventos.append({
+                "tipo": "SL_TOCADO", "sym": sym, "trade": trade,
+                "precio_cierre": precio_actual,
+                "resultado_pct": -trade["sl_pct"],
+                "ganancia_usd": precio_actual - entrada,
+                "mensaje": f"🛑 STOP LOSS TOCADO — Perdida de {trade['sl_pct']}%"
+            })
+            cerrar_trade(sym)
+
+        elif dir_trade == "VENTA" and precio_actual >= sl:
+            eventos.append({
+                "tipo": "SL_TOCADO", "sym": sym, "trade": trade,
+                "precio_cierre": precio_actual,
+                "resultado_pct": -trade["sl_pct"],
+                "ganancia_usd": entrada - precio_actual,
+                "mensaje": f"🛑 STOP LOSS TOCADO — Perdida de {trade['sl_pct']}%"
+            })
+            cerrar_trade(sym)
+
+        # ── Verificar TP tocado ──
+        elif dir_trade == "COMPRA" and precio_actual >= tp:
+            eventos.append({
+                "tipo": "TP_TOCADO", "sym": sym, "trade": trade,
+                "precio_cierre": precio_actual,
+                "resultado_pct": trade["tp_pct"],
+                "ganancia_usd": precio_actual - entrada,
+                "mensaje": f"✅ TAKE PROFIT ALCANZADO — Ganancia de {trade['tp_pct']}%"
+            })
+            cerrar_trade(sym)
+
+        elif dir_trade == "VENTA" and precio_actual <= tp:
+            eventos.append({
+                "tipo": "TP_TOCADO", "sym": sym, "trade": trade,
+                "precio_cierre": precio_actual,
+                "resultado_pct": trade["tp_pct"],
+                "ganancia_usd": entrada - precio_actual,
+                "mensaje": f"✅ TAKE PROFIT ALCANZADO — Ganancia de {trade['tp_pct']}%"
+            })
+            cerrar_trade(sym)
+
+    return eventos
+
+def filtrar_señales_nuevas(resultados):
+    """
+    De la lista de resultados, devuelve solo los que son realmente NUEVOS:
+    - No hay trade activo para ese simbolo, O
+    - La direccion cambio (ej: teniamos COMPRA y ahora es VENTA)
+    """
+    nuevos = []
+    for r in resultados:
+        sym = r["sym"]
+        if sym not in _trades_activos:
+            nuevos.append(r)
+            abrir_trade(sym, r)
+        else:
+            trade_actual = _trades_activos[sym]
+            # Cambio de direccion — cerrar el anterior y abrir nuevo
+            if trade_actual["direccion"] != r["direccion"]:
+                print(f"  🔄 {sym}: Direccion cambio {trade_actual['direccion']} → {r['direccion']}")
+                cerrar_trade(sym)
+                nuevos.append(r)
+                abrir_trade(sym, r)
+            else:
+                print(f"  ⏸️  {sym}: Trade activo ({trade_actual['direccion']}) — esperando SL/TP")
+    return nuevos
+
 # ── Sesiones de mercado ───────────────────────────────────────
 from datetime import timezone, timedelta
 
@@ -714,6 +840,87 @@ def construir_html(resultados):
 # ─────────────────────────────────────────────────────────────
 # ENVÍO Y LOOP
 # ─────────────────────────────────────────────────────────────
+def enviar_cierre_trades(eventos):
+    """Envía correo cuando un trade cierra por SL o TP."""
+    try:
+        msg = MIMEMultipart("alternative")
+        cierres_tp = [e for e in eventos if e["tipo"] == "TP_TOCADO"]
+        cierres_sl = [e for e in eventos if e["tipo"] == "SL_TOCADO"]
+        asunto_icon = "✅" if cierres_tp and not cierres_sl else "🛑" if cierres_sl and not cierres_tp else "📊"
+        msg["Subject"] = f"{asunto_icon} {len(eventos)} Trade(s) Cerrado(s) — {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+        msg["From"] = EMAIL_REMITENTE
+        msg["To"]   = EMAIL_DESTINO
+
+        filas = ""
+        for ev in eventos:
+            t = ev["trade"]
+            es_tp = ev["tipo"] == "TP_TOCADO"
+            color_res = "#00B074" if es_tp else "#E94560"
+            icono_res = "✅ GANANCIA" if es_tp else "🛑 PÉRDIDA"
+            signo     = "+" if es_tp else "-"
+            diff      = abs(ev["precio_cierre"] - t["entrada"])
+
+            filas += (
+                f'<div style="background:#16213E;border-radius:12px;padding:18px;margin:12px 0;'
+                f'border-left:6px solid {color_res};">'
+                f'<table width="100%"><tr>'
+                f'<td><b style="font-size:18px;color:#fff;">{t["nombre"]}</b><br>'
+                f'<span style="color:#aaa;font-size:11px;">Cerrado: {datetime.now().strftime("%d/%m/%Y %H:%M")}</span></td>'
+                f'<td align="right">'
+                f'<span style="font-size:22px;font-weight:bold;color:{color_res};">{icono_res}</span><br>'
+                f'<span style="font-size:16px;color:{color_res};font-weight:bold;">{signo}{abs(ev["resultado_pct"]):.1f}%</span>'
+                f'</td></tr></table>'
+                f'<table width="100%" style="margin:12px 0;background:#0F3460;border-radius:8px;">'
+                f'<tr>'
+                f'<td style="color:#aaa;font-size:11px;padding:6px 10px;">Dirección</td>'
+                f'<td style="color:#aaa;font-size:11px;padding:6px 10px;">Entrada</td>'
+                f'<td style="color:#aaa;font-size:11px;padding:6px 10px;">Cierre</td>'
+                f'<td style="color:#aaa;font-size:11px;padding:6px 10px;">Diferencia</td>'
+                f'</tr><tr>'
+                f'<td style="color:#F5A623;font-weight:bold;padding:6px 10px;">{t["direccion"]}</td>'
+                f'<td style="color:#fff;padding:6px 10px;">${t["entrada"]:,.5f}</td>'
+                f'<td style="color:{color_res};font-weight:bold;padding:6px 10px;">${ev["precio_cierre"]:,.5f}</td>'
+                f'<td style="color:{color_res};font-weight:bold;padding:6px 10px;">{signo}${diff:,.5f}</td>'
+                f'</tr></table>'
+                f'<div style="background:{color_res}22;border:1px solid {color_res};border-radius:8px;'
+                f'padding:10px;text-align:center;margin-top:8px;">'
+                f'<b style="color:{color_res};font-size:14px;">{ev["mensaje"]}</b>'
+                f'</div>'
+                f'<div style="color:#555;font-size:10px;margin-top:8px;text-align:center;">'
+                f'Abierto: {t["hora"]} | SL original: ${t["sl"]:,.5f} | TP original: ${t["tp"]:,.5f}'
+                f'</div>'
+                f'</div>'
+            )
+
+        resumen_color = "#00B074" if cierres_tp and not cierres_sl else "#E94560" if cierres_sl and not cierres_tp else "#F5A623"
+        html_body = (
+            f'<html><body style="margin:0;padding:0;background:#0D0D1A;font-family:Arial,sans-serif;color:#fff;">'
+            f'<div style="max-width:640px;margin:0 auto;padding:20px;">'
+            f'<div style="background:#1A1A2E;border-radius:16px;padding:20px;text-align:center;margin-bottom:12px;">'
+            f'<div style="font-size:32px;">{"✅" if cierres_tp and not cierres_sl else "🛑" if cierres_sl and not cierres_tp else "📊"}</div>'
+            f'<h1 style="margin:6px 0;font-size:20px;color:{resumen_color};">TRADE(S) CERRADO(S)</h1>'
+            f'<p style="color:#aaa;font-size:12px;">'
+            f'{"✅ " + str(len(cierres_tp)) + " Take Profit" if cierres_tp else ""} '
+            f'{"🛑 " + str(len(cierres_sl)) + " Stop Loss" if cierres_sl else ""}'
+            f'</p></div>'
+            f'{filas}'
+            f'<div style="text-align:center;color:#555;font-size:10px;padding:10px;border-top:1px solid #222;margin-top:12px;">'
+            f'Bot Railway 24/7 — Registro automatico de trades</div>'
+            f'</div></body></html>'
+        )
+
+        txt = "\n".join([f"{ev['trade']['nombre']}: {ev['mensaje']} | Cierre: ${ev['precio_cierre']:,.5f}" for ev in eventos])
+        msg.attach(MIMEText(txt, "plain"))
+        msg.attach(MIMEText(html_body, "html"))
+
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+            s.ehlo(); s.starttls(); s.ehlo()
+            s.login(EMAIL_REMITENTE, EMAIL_CONTRASENA)
+            s.sendmail(EMAIL_REMITENTE, EMAIL_DESTINO, msg.as_string())
+        print(f"  ✅ Correo de cierre enviado — {len(eventos)} trade(s)")
+    except Exception as e:
+        print(f"  ❌ Error correo cierre: {e}")
+
 def enviar(res):
     try:
         msg = MIMEMultipart("alternative")
@@ -789,15 +996,16 @@ def revisar():
     cr = get_crumb()
     print(f"  {'✅ Conectado a Yahoo' if cr else '⚠️ Sin crumb...'}")
 
-    res = []
+    # ── Analizar todos los activos del turno ──
+    todos_resultados = []
     for sym in activos_a_revisar:
         cat = categoria(sym)
         tf  = INTERVALOS_MERCADO.get(cat, {}).get("tf","1d")
         print(f"  [{cat:6}|{tf}] {sym}...", end=" ", flush=True)
         r = analizar(sym, cr)
         if r:
-            print(f"⚠️  {len(r['senales'])} señal(es) → {r['direccion']} | SL:${r['niveles']['sl']:,.4f} TP:${r['niveles']['tp']:,.4f}")
-            res.append(r)
+            print(f"⚠️  señal → {r['direccion']} | Entrada:${r['niveles']['entrada']:,.4f} SL:${r['niveles']['sl']:,.4f} TP:${r['niveles']['tp']:,.4f}")
+            todos_resultados.append(r)
         else:
             print("✅ Sin señal")
         time.sleep(2)
@@ -806,9 +1014,28 @@ def revisar():
     for cat in cats_a_revisar:
         marcar_revisado(cat)
 
-    print(f"\n  📊 {len(res)}/{len(activos_a_revisar)} con señales")
-    if res: enviar(res)
-    else: print("  😴 Sin señales relevantes")
+    # ── Verificar trades activos (SL/TP tocado) ──
+    eventos_cierre = verificar_trades_activos(todos_resultados)
+    if eventos_cierre:
+        print(f"\n  🔔 {len(eventos_cierre)} trade(s) cerrado(s):")
+        for ev in eventos_cierre:
+            print(f"    {ev['sym']}: {ev['mensaje']}")
+        enviar_cierre_trades(eventos_cierre)
+
+    # ── Filtrar solo señales NUEVAS (sin trade activo o cambio de direccion) ──
+    senales_nuevas = filtrar_señales_nuevas(todos_resultados)
+
+    # ── Estado de trades activos ──
+    if _trades_activos:
+        print(f"\n  📂 Trades activos: {len(_trades_activos)}")
+        for sym, t in _trades_activos.items():
+            print(f"    {sym}: {t['direccion']} desde ${t['entrada']:,.4f} | SL:${t['sl']:,.4f} | TP:${t['tp']:,.4f}")
+
+    print(f"\n  📊 {len(senales_nuevas)} señal(es) NUEVA(s) / {len(todos_resultados)} detectadas")
+    if senales_nuevas:
+        enviar(senales_nuevas)
+    elif not eventos_cierre:
+        print("  😴 Sin señales nuevas")
 
 if __name__ == "__main__":
     print(f"""
