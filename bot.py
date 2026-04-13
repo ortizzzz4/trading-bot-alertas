@@ -1,11 +1,12 @@
 """
-Bot de Alertas de Trading v8
+Bot de Alertas de Trading v9
 - Acciones/ETF: RSI + EMA + Volumen
 - Forex: SMC (BOS, CHoCH, Order Block, FVG, Liquidity Sweep)
-- Oro: MA Cross SMA50/SMA100 (estrategia propia)
-- BTC: RSI + Soporte/Resistencia
+- Oro: MA Cross SMA50/SMA100 — timeframes 15m/30m/1h/1d según sesión
+- BTC / NAS100 / SP500: RSI + EMA + Soporte/Resistencia — TF 15m (24h)
 - TODOS: Precio entrada, Stop Loss y Take Profit exactos
-- NUEVO v8: Imagen del gráfico con indicadores en el correo
+- v8: Imagen del gráfico con indicadores en el correo
+- v9: NAS100 + SP500 añadidos | BTC/índices en TF 15min | modo "mejor oportunidad"
 """
 import requests, pandas as pd, numpy as np
 import smtplib, time, os, random, io, base64
@@ -29,12 +30,14 @@ INTERVALO_MIN    = int(os.environ.get("INTERVALO_MINUTOS", "30"))
 FOREX_INTERVALO = os.environ.get("FOREX_INTERVALO", "1h")
 FOREX_PERIODO   = int(os.environ.get("FOREX_PERIODO_DIAS", "30"))
 
+# INDICE = NAS100 + SP500 + BTC — corren 24h en TF corto, revisan cada 15min
 INTERVALOS_MERCADO = {
-    "FOREX":  {"tf": FOREX_INTERVALO, "dias": FOREX_PERIODO, "cada_min": 60},
-    "ORO":    {"tf": "1d", "dias": 120, "cada_min": 240},
-    "CRYPTO": {"tf": "1d", "dias": 90,  "cada_min": 30},
-    "ACCION": {"tf": "1d", "dias": 90,  "cada_min": 1440},
-    "ETF":    {"tf": "1d", "dias": 90,  "cada_min": 1440},
+    "FOREX":   {"tf": FOREX_INTERVALO, "dias": FOREX_PERIODO, "cada_min": 60},
+    "ORO":     {"tf": "15m", "dias": 7,   "cada_min": 15},   # TF dinámico según sesión (15m o 30m)
+    "CRYPTO":  {"tf": "15m", "dias": 7,   "cada_min": 15},    # BTC en 15min, 24h
+    "INDICE":  {"tf": "15m", "dias": 7,   "cada_min": 15},    # NAS100/SP500 en 15min
+    "ACCION":  {"tf": "1d",  "dias": 90,  "cada_min": 1440},
+    "ETF":     {"tf": "1d",  "dias": 90,  "cada_min": 1440},
 }
 
 _ultimo_chequeo = {}
@@ -529,17 +532,28 @@ def en_sesion_ny():
     return 9.5 <= hora <= 16.0
 
 def en_sesion_oro():
-    ahora_utc = datetime.now(timezone.utc)
-    if ahora_utc.weekday() >= 5:
-        return False, "1d", 240, "Fin de semana"
-    hora_utc = ahora_utc.hour + ahora_utc.minute / 60
-    if 0 <= hora_utc < 8:
-        return True, "1d", 240, "🌏 Asia"
-    if 10 <= hora_utc < 14:
-        return True, "30m", 30, "🗽 NY Peak (alta volatilidad)"
-    if 14 <= hora_utc < 21:
-        return True, "1d", 240, "🗽 NY"
-    return False, "1d", 240, "Fuera de sesion"
+    """
+    Sesiones del Oro en hora de El Salvador (CST = UTC-6):
+    - Mañana NY:  06:00 – 10:00 CST  → 12:00 – 16:00 UTC  | TF 15min, revisa c/15min
+    - Asia/tarde: 18:00 – 20:30 CST  → 00:00 – 02:30 UTC  | TF 30min, revisa c/30min
+    Fuera de esas ventanas → inactivo
+    Retorna: (activo: bool, tf: str, cada_min: int, nombre_sesion: str)
+    """
+    TZ_CST = timezone(timedelta(hours=-6))   # El Salvador CST
+    ahora  = datetime.now(TZ_CST)
+    if ahora.weekday() >= 5:                  # sábado/domingo
+        return False, "15m", 15, "Fin de semana"
+    hora = ahora.hour + ahora.minute / 60
+
+    # ── Mañana NY: 06:00–10:00 CST (apertura Londres + NY) ──
+    if 6.0 <= hora < 10.0:
+        return True, "15m", 15, "🗽 NY Mañana (06:00–10:00 CST)"
+
+    # ── Sesión Asia: 18:00–20:30 CST ──────────────────────
+    if 18.0 <= hora < 20.5:
+        return True, "30m", 30, "🌏 Asia (18:00–20:30 CST)"
+
+    return False, "15m", 15, "Fuera de sesión Oro"
 
 def sesion_activa(cat):
     if cat in ("ACCION", "ETF"):
@@ -547,6 +561,7 @@ def sesion_activa(cat):
     if cat == "ORO":
         activo, tf, cada, nombre = en_sesion_oro()
         return activo
+    # FOREX, CRYPTO, INDICE (futuros NQ/ES) — activos 24h
     return True
 
 def config_oro_dinamica():
@@ -558,7 +573,8 @@ SL_TP = {
     "ETF":    {"sl": 1.5,  "tp": 3.0},
     "FOREX":  {"sl": 0.5,  "tp": 1.0},
     "ORO":    {"sl": 1.0,  "tp": 2.0},
-    "CRYPTO": {"sl": 5.0,  "tp": 10.0},
+    "CRYPTO": {"sl": 3.0,  "tp": 6.0},   # TF 15min — SL/TP más ajustados
+    "INDICE": {"sl": 1.0,  "tp": 2.0},   # NAS100/SP500 en 15min
 }
 
 ACCIONES = ["AAPL","NVDA","TSLA","MSFT","AMZN","GOOGL","META"]
@@ -566,10 +582,14 @@ ETFS     = ["VTI","VOO","BND","SDY"]
 FOREX    = ["EURUSD=X","USDJPY=X","USDCAD=X","AUDUSD=X"]
 ORO      = ["GC=F"]
 CRYPTO   = ["BTC-USD"]
-TODOS    = ACCIONES + ETFS + FOREX + ORO + CRYPTO
+INDICES  = ["NQ=F", "ES=F"]     # NAS100 (NQ futures) y SP500 (ES futures)
+TODOS    = ACCIONES + ETFS + FOREX + ORO + CRYPTO + INDICES
 
 NOMBRES = {
-    "GC=F":"XAUUSD — Oro","BTC-USD":"BTC/USD — Bitcoin",
+    "GC=F":    "XAUUSD — Oro",
+    "BTC-USD": "BTC/USD — Bitcoin",
+    "NQ=F":    "NAS100 — Nasdaq 100 Futures",
+    "ES=F":    "SP500 — S&P 500 Futures",
     "EURUSD=X":"EUR/USD","USDJPY=X":"USD/JPY",
     "USDCAD=X":"USD/CAD","AUDUSD=X":"AUD/USD",
     "VTI":"VTI — ETF Mercado Total","VOO":"VOO — ETF S&P500",
@@ -577,13 +597,14 @@ NOMBRES = {
 }
 
 def categoria(s):
-    if s in FOREX:  return "FOREX"
-    if s in ORO:    return "ORO"
-    if s in CRYPTO: return "CRYPTO"
-    if s in ETFS:   return "ETF"
+    if s in FOREX:   return "FOREX"
+    if s in ORO:     return "ORO"
+    if s in CRYPTO:  return "CRYPTO"
+    if s in INDICES: return "INDICE"
+    if s in ETFS:    return "ETF"
     return "ACCION"
 
-ICONOS = {"ACCION":"📈","ETF":"🗂️","FOREX":"💱","ORO":"🥇","CRYPTO":"₿"}
+ICONOS = {"ACCION":"📈","ETF":"🗂️","FOREX":"💱","ORO":"🥇","CRYPTO":"₿","INDICE":"📊"}
 
 UA = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
@@ -761,60 +782,111 @@ def analizar_smc(df, sym):
 
 
 # ─────────────────────────────────────────────────────────────
-# ESTRATEGIA ORO — MA Cross SMA50/SMA100
+# ESTRATEGIA ORO — MA Cross adaptativo por TF
+# TF 15min / 30min: EMA20 × EMA50  (rápido, sesiones cortas)
+# TF 1d           : SMA50 × SMA100 (largo plazo)
 # ─────────────────────────────────────────────────────────────
 def analizar_ma_cross(df, sym):
-    if len(df) < 105:
-        return None
-    c = df["Close"]; precio = float(c.iloc[-1])
-    sma50  = c.rolling(50).mean()
-    sma100 = c.rolling(100).mean()
-    s50_hoy  = float(sma50.iloc[-1]);  s50_ayer  = float(sma50.iloc[-2])
-    s100_hoy = float(sma100.iloc[-1]); s100_ayer = float(sma100.iloc[-2])
+    c = df["Close"]
+    precio = float(c.iloc[-1])
+    n = len(c)
+
+    # ── Elegir MAs según cantidad de datos disponibles ──
+    if n >= 105:
+        # Suficiente historia para SMA50/SMA100 (TF diario)
+        ma_r  = c.rolling(50).mean()
+        ma_l  = c.rolling(100).mean()
+        r_nom = "SMA50"; l_nom = "SMA100"
+    elif n >= 50:
+        # TF 15min/30min con suficientes velas para EMA20/EMA50
+        ma_r  = c.ewm(span=20, adjust=False).mean()
+        ma_l  = c.ewm(span=50, adjust=False).mean()
+        r_nom = "EMA20"; l_nom = "EMA50"
+    else:
+        # Muy pocas velas — EMA9/EMA21
+        ma_r  = c.ewm(span=9,  adjust=False).mean()
+        ma_l  = c.ewm(span=21, adjust=False).mean()
+        r_nom = "EMA9"; l_nom = "EMA21"
+
+    mr_hoy  = float(ma_r.iloc[-1]); mr_ayer  = float(ma_r.iloc[-2])
+    ml_hoy  = float(ma_l.iloc[-1]); ml_ayer  = float(ma_l.iloc[-2])
     senales = []; direccion = None
 
-    if s50_ayer < s100_ayer and s50_hoy > s100_hoy:
-        senales.append({"tipo": "⭐ MA CROSS ALCISTA — SMA50 cruzo ARRIBA SMA100", "a": "✅ SEÑAL DE COMPRA",
-                         "desc": f"SMA50=${s50_hoy:,.2f} cruzo ARRIBA SMA100=${s100_hoy:,.2f}. Zona verde activada.",
-                         "f": "MUY FUERTE"})
+    # ── Cruce alcista ──
+    if mr_ayer < ml_ayer and mr_hoy > ml_hoy:
+        senales.append({
+            "tipo": f"⭐ MA CROSS ALCISTA — {r_nom} cruzo ARRIBA {l_nom}",
+            "a":    "✅ SEÑAL DE COMPRA",
+            "desc": f"{r_nom}=${mr_hoy:,.2f} cruzo ARRIBA {l_nom}=${ml_hoy:,.2f}. Zona verde activada.",
+            "f":    "MUY FUERTE"
+        })
         direccion = "COMPRA"
-    elif s50_ayer > s100_ayer and s50_hoy < s100_hoy:
-        senales.append({"tipo": "💀 MA CROSS BAJISTA — SMA50 cruzo ABAJO SMA100", "a": "❌ SEÑAL DE VENTA",
-                         "desc": f"SMA50=${s50_hoy:,.2f} cruzo ABAJO SMA100=${s100_hoy:,.2f}. Zona roja activada.",
-                         "f": "MUY FUERTE"})
+
+    # ── Cruce bajista ──
+    elif mr_ayer > ml_ayer and mr_hoy < ml_hoy:
+        senales.append({
+            "tipo": f"💀 MA CROSS BAJISTA — {r_nom} cruzo ABAJO {l_nom}",
+            "a":    "❌ SEÑAL DE VENTA",
+            "desc": f"{r_nom}=${mr_hoy:,.2f} cruzo ABAJO {l_nom}=${ml_hoy:,.2f}. Zona roja activada.",
+            "f":    "MUY FUERTE"
+        })
         direccion = "VENTA"
+
+    # ── Sin cruce — estado actual + cruce inminente ──
     else:
-        dist = abs(s50_hoy - s100_hoy) / s100_hoy * 100
-        if dist < 0.5:
-            senales.append({"tipo": "⚠️ CRUCE INMINENTE SMA50/SMA100", "a": "👀 PREPARAR ENTRADA",
-                              "desc": f"SMA50 y SMA100 separadas solo {dist:.2f}%. Cruce puede ocurrir pronto.",
-                              "f": "MEDIA"})
-            direccion = "COMPRA" if s50_hoy > s100_hoy else "VENTA"
+        dist = abs(mr_hoy - ml_hoy) / ml_hoy * 100
+        estado = f"{r_nom} > {l_nom} — tendencia alcista" if mr_hoy > ml_hoy else f"{r_nom} < {l_nom} — tendencia bajista"
+        if dist < 0.3:
+            senales.append({
+                "tipo": f"⚠️ CRUCE INMINENTE {r_nom}/{l_nom}",
+                "a":    "👀 PREPARAR ENTRADA",
+                "desc": f"Medias separadas solo {dist:.3f}%. {estado}. Cruce puede ocurrir en la próxima vela.",
+                "f":    "MEDIA"
+            })
+            direccion = "COMPRA" if mr_hoy > ml_hoy else "VENTA"
 
     if not senales or not direccion:
         return None
+
+    # ── RSI como filtro ──
     rsi_val = float(calc_rsi(c).iloc[-1])
     if direccion == "COMPRA" and rsi_val > 70:
-        senales.append({"tipo": "⚠️ FILTRO RSI", "a": "👀 PRECAUCION",
-                         "desc": f"MA Cross dice COMPRA pero RSI={rsi_val:.0f} sobrecomprado. Espera retroceso.",
-                         "f": "MEDIA"})
+        senales.append({
+            "tipo": "⚠️ FILTRO RSI",
+            "a":    "👀 PRECAUCION",
+            "desc": f"MA Cross dice COMPRA pero RSI={rsi_val:.0f} sobrecomprado. Considera esperar retroceso.",
+            "f":    "MEDIA"
+        })
     elif direccion == "VENTA" and rsi_val < 30:
-        senales.append({"tipo": "⚠️ FILTRO RSI", "a": "👀 PRECAUCION",
-                         "desc": f"MA Cross dice VENTA pero RSI={rsi_val:.0f} sobrevendido. Espera rebote.",
-                         "f": "MEDIA"})
+        senales.append({
+            "tipo": "⚠️ FILTRO RSI",
+            "a":    "👀 PRECAUCION",
+            "desc": f"MA Cross dice VENTA pero RSI={rsi_val:.0f} sobrevendido. Considera esperar rebote.",
+            "f":    "MEDIA"
+        })
+
     niveles = calc_niveles(precio, direccion, "ORO")
-    return {"senales": senales, "direccion": direccion, "niveles": niveles,
-            "sma50": s50_hoy, "sma100": s100_hoy, "rsi": rsi_val}
+    return {
+        "senales":  senales,
+        "direccion": direccion,
+        "niveles":   niveles,
+        "sma50":     mr_hoy,   # reutilizamos key para el gráfico
+        "sma100":    ml_hoy,
+        "r_nom":     r_nom,
+        "l_nom":     l_nom,
+        "rsi":       rsi_val
+    }
 
 
 # ─────────────────────────────────────────────────────────────
-# ESTRATEGIA GENERAL — Acciones, ETF, BTC
+# ESTRATEGIA GENERAL — Acciones, ETF, BTC, NAS100, SP500
 # ─────────────────────────────────────────────────────────────
 def analizar_general(df, sym, cat):
     PARAMS = {
         "ACCION": {"rsi_b": 30, "rsi_a": 70, "cambio": 2.0, "ema_c": 20, "ema_l": 50},
         "ETF":    {"rsi_b": 35, "rsi_a": 65, "cambio": 1.5, "ema_c": 20, "ema_l": 50},
-        "CRYPTO": {"rsi_b": 30, "rsi_a": 70, "cambio": 4.0, "ema_c": 20, "ema_l": 50},
+        "CRYPTO": {"rsi_b": 35, "rsi_a": 65, "cambio": 1.5, "ema_c": 9,  "ema_l": 21},  # TF 15min
+        "INDICE": {"rsi_b": 35, "rsi_a": 65, "cambio": 0.5, "ema_c": 9,  "ema_l": 21},  # TF 15min
     }
     p = PARAMS.get(cat, PARAMS["ACCION"])
     c = df["Close"]; precio = float(c.iloc[-1])
@@ -829,20 +901,20 @@ def analizar_general(df, sym, cat):
 
     if cd >= p["cambio"]:
         senales.append({"tipo": "📈 SUBIDA FUERTE", "a": "⚡ POSIBLE COMPRA",
-                         "desc": f"Subio {cd:.2f}% hoy (umbral {p['cambio']}%)", "f": "MEDIA"})
+                         "desc": f"Subio {cd:.2f}% en vela anterior (umbral {p['cambio']}%)", "f": "MEDIA"})
         direccion = "COMPRA"
     elif cd <= -p["cambio"]:
         senales.append({"tipo": "📉 CAIDA FUERTE", "a": "⚠️ POSIBLE VENTA",
-                         "desc": f"Cayo {abs(cd):.2f}% hoy (umbral {p['cambio']}%)", "f": "MEDIA"})
+                         "desc": f"Cayo {abs(cd):.2f}% en vela anterior (umbral {p['cambio']}%)", "f": "MEDIA"})
         direccion = "VENTA"
 
     if rsi_v <= p["rsi_b"]:
         senales.append({"tipo": "🔵 RSI SOBREVENDIDO", "a": "✅ SEÑAL DE COMPRA",
-                         "desc": f"RSI={rsi_v:.1f} bajo {p['rsi_b']} — muy barato tecnicamente", "f": "FUERTE"})
+                         "desc": f"RSI={rsi_v:.1f} bajo {p['rsi_b']} — zona de compra técnica", "f": "FUERTE"})
         direccion = "COMPRA"
     elif rsi_v >= p["rsi_a"]:
         senales.append({"tipo": "🔴 RSI SOBRECOMPRADO", "a": "❌ SEÑAL DE VENTA",
-                         "desc": f"RSI={rsi_v:.1f} sobre {p['rsi_a']} — muy caro tecnicamente", "f": "FUERTE"})
+                         "desc": f"RSI={rsi_v:.1f} sobre {p['rsi_a']} — zona de venta técnica", "f": "FUERTE"})
         direccion = "VENTA"
 
     ec_h = float(ema_c.iloc[-1]); ec_a = float(ema_c.iloc[-2])
@@ -862,19 +934,49 @@ def analizar_general(df, sym, cat):
             va = float(v.iloc[-1]); vp = float(v.rolling(20).mean().iloc[-1])
             if vp > 0 and va / vp >= 2.0:
                 senales.append({"tipo": "🔊 VOLUMEN INUSUAL", "a": "👀 PRESTAR ATENCION",
-                                  "desc": f"Volumen {va / vp:.1f}x el promedio", "f": "MEDIA"})
+                                  "desc": f"Volumen {va / vp:.1f}x el promedio de 20 velas", "f": "MEDIA"})
 
-    if cat == "CRYPTO":
-        mn = float(c.rolling(30).min().iloc[-1]); mx = float(c.rolling(30).max().iloc[-1])
-        dm = ((precio - mn) / mn) * 100; dM = ((mx - precio) / mx) * 100
-        if dm <= 5:
-            senales.append({"tipo": "🛡️ CERCA SOPORTE", "a": "✅ ZONA DE COMPRA",
-                              "desc": f"BTC a {dm:.1f}% del minimo 30d (${mn:,.0f})", "f": "FUERTE"})
-            direccion = "COMPRA"
-        elif dM <= 5:
-            senales.append({"tipo": "🚧 CERCA RESISTENCIA", "a": "❌ ZONA DE VENTA",
-                              "desc": f"BTC a {dM:.1f}% del maximo 30d (${mx:,.0f})", "f": "FUERTE"})
-            direccion = "VENTA"
+    # ── Soporte/Resistencia para CRYPTO e INDICE (TF corto) ──
+    if cat in ("CRYPTO", "INDICE"):
+        ventana_sr = 50  # 50 velas de 15min ≈ ~12 horas
+        if len(c) >= ventana_sr:
+            mn = float(c.rolling(ventana_sr).min().iloc[-1])
+            mx = float(c.rolling(ventana_sr).max().iloc[-1])
+            rango = mx - mn
+            dm = ((precio - mn) / mn) * 100
+            dM = ((mx - precio) / mx) * 100
+            if dm <= 1.5:
+                senales.append({"tipo": "🛡️ CERCA SOPORTE 50v", "a": "✅ ZONA DE COMPRA",
+                                  "desc": f"A solo {dm:.2f}% del soporte de 50 velas (${mn:,.2f}). Rebote probable.",
+                                  "f": "FUERTE"})
+                direccion = "COMPRA"
+            elif dM <= 1.5:
+                senales.append({"tipo": "🚧 CERCA RESISTENCIA 50v", "a": "❌ ZONA DE VENTA",
+                                  "desc": f"A solo {dM:.2f}% de la resistencia de 50 velas (${mx:,.2f}). Rechazo probable.",
+                                  "f": "FUERTE"})
+                direccion = "VENTA"
+
+    # ── Modo MEJOR OPORTUNIDAD (solo para CRYPTO e INDICE) ──────
+    # Si no hay señal estricta, forzar la mejor dirección disponible
+    # para que siempre haya una alerta de BTC/NAS100/SP500
+    if not senales and cat in ("CRYPTO", "INDICE"):
+        # Decidir dirección por tendencia de EMA + RSI
+        if ec_h > el_h:
+            dir_forzada = "COMPRA"
+            motivo = f"EMA{p['ema_c']} ({ec_h:,.2f}) sobre EMA{p['ema_l']} ({el_h:,.2f}) — tendencia alcista"
+        else:
+            dir_forzada = "VENTA"
+            motivo = f"EMA{p['ema_c']} ({ec_h:,.2f}) bajo EMA{p['ema_l']} ({el_h:,.2f}) — tendencia bajista"
+
+        rsi_desc = ("RSI neutro" if 45 <= rsi_v <= 55
+                    else f"RSI {'sobrecomprado' if rsi_v > 55 else 'sobrevendido'} ({rsi_v:.0f})")
+        senales.append({
+            "tipo": "📡 MEJOR OPORTUNIDAD DISPONIBLE",
+            "a":    "✅ COMPRA SUGERIDA" if dir_forzada == "COMPRA" else "❌ VENTA SUGERIDA",
+            "desc": f"{motivo} | {rsi_desc} | Cambio vela: {cd:+.2f}%",
+            "f":    "MEDIA"
+        })
+        direccion = dir_forzada
 
     if not senales or not direccion:
         return None
@@ -896,8 +998,9 @@ def analizar(sym, cr=None):
     try:
         cat = categoria(sym)
         if cat == "ORO":
-            _, oro_tf, _, oro_sesion = en_sesion_oro()
-            oro_dias = 30 if oro_tf == "30m" else 120
+            activo, oro_tf, oro_cada, oro_sesion = en_sesion_oro()
+            # 15m → 7 días de datos (~672 velas), 30m → 14 días (~672 velas)
+            oro_dias = 7 if oro_tf == "15m" else 14
             df = get_datos(sym, cr, tf=oro_tf, dias=oro_dias)
             print(f"    [{oro_sesion}|{oro_tf}]", end=" ")
         else:
@@ -921,6 +1024,7 @@ def analizar(sym, cr=None):
         elif cat == "ORO":
             res = analizar_ma_cross(df, sym)
         else:
+            # ACCION, ETF, CRYPTO, INDICE
             res = analizar_general(df, sym, cat)
 
         if not res:
@@ -951,14 +1055,16 @@ CAT_LABEL = {
     "ACCION": "ACCIONES",
     "ETF":    "ETFs",
     "ORO":    "ORO — Estrategia MA Cross SMA50/SMA100",
-    "CRYPTO": "CRYPTO — BTC/USD",
+    "CRYPTO": "CRYPTO — BTC/USD (15min)",
+    "INDICE": "ÍNDICES — NAS100 & SP500 Futures (15min)",
     "FOREX":  "FOREX — Estrategia SMC (Smart Money Concepts)",
 }
 CAT_DESC = {
     "ACCION": "RSI + EMA + Volumen. Opera solo 9:30-16:00 ET.",
     "ETF":    "RSI + EMA. Menos volatiles, ideales largo plazo.",
-    "ORO":    "SMA50 cruza SMA100. Zona verde=alcista, zona roja=bajista. SL 1% / TP 2%.",
-    "CRYPTO": "RSI + Soporte/Resistencia 30d. SL 5% / TP 10%. Alta volatilidad.",
+    "ORO":    "MA Cross adaptativo. Sesiones: 🗽 06:00–10:00 CST (15min) | 🌏 18:00–20:30 CST (30min). SL 1% / TP 2%.",
+    "CRYPTO": "RSI + EMA9/21 + Soporte/Resistencia. TF 15min. SL 3% / TP 6%. 24h.",
+    "INDICE": "EMA9/21 + RSI + S/R. TF 15min. NQ=NAS100, ES=SP500. SL 1% / TP 2%.",
     "FOREX":  "BOS, CHoCH, Order Block, FVG, Liquidity Sweep. SL 0.5% / TP 1%. Opera 24h.",
 }
 
@@ -972,7 +1078,7 @@ def construir_html(resultados, img_cids):
         grupos.setdefault(r["cat"], []).append(r)
     body = ""
 
-    for cat in ["ACCION", "ETF", "ORO", "CRYPTO", "FOREX"]:
+    for cat in ["ACCION", "ETF", "ORO", "CRYPTO", "INDICE", "FOREX"]:
         if cat not in grupos: continue
         body += (f'<div style="background:#0F3460;border-radius:10px;padding:10px 16px;margin:20px 0 8px;">'
                  f'<span style="font-size:16px;">{ICONOS[cat]}</span> '
@@ -1042,14 +1148,18 @@ def construir_html(resultados, img_cids):
                 f'</div>'
             )
 
-            # Info extra ORO / FOREX
+            # Info extra ORO / FOREX / INDICE
             info_extra = ""
             ex = r.get("extra", {})
             if cat == "ORO" and "sma50" in ex:
+                r_nom = ex.get("r_nom", "MA_R")
+                l_nom = ex.get("l_nom", "MA_L")
+                _, oro_tf, _, oro_ses = en_sesion_oro()
                 info_extra = (
                     f'<div style="background:#1a1a2a;border-radius:8px;padding:8px;margin:6px 0;font-size:11px;color:#aaa;">'
-                    f'SMA50: <b style="color:#4488ff;">${ex["sma50"]:,.2f}</b> | '
-                    f'SMA100: <b style="color:#44bb44;">${ex["sma100"]:,.2f}</b> | '
+                    f'🕐 Sesión: <b style="color:#F5A623;">{oro_ses}</b> | TF: <b>{oro_tf}</b> | '
+                    f'{r_nom}: <b style="color:#4488ff;">${ex["sma50"]:,.2f}</b> | '
+                    f'{l_nom}: <b style="color:#44bb44;">${ex["sma100"]:,.2f}</b> | '
                     f'RSI: <b style="color:#F5A623;">{ex["rsi"]:.1f}</b>'
                     f'</div>'
                 )
@@ -1058,6 +1168,16 @@ def construir_html(resultados, img_cids):
                     f'<div style="background:#1a1a2a;border-radius:8px;padding:8px;margin:6px 0;font-size:11px;color:#aaa;">'
                     f'Estrategia: <b style="color:#F5A623;">Smart Money Concepts (SMC)</b> | '
                     f'Señales detectadas: <b>{len(r["senales"])}</b>'
+                    f'</div>'
+                )
+            elif cat == "INDICE":
+                rsi_val = ex.get("rsi", 0)
+                ec_n = ex.get("ec_n", 9); el_n = ex.get("el_n", 21)
+                info_extra = (
+                    f'<div style="background:#1a1a2a;border-radius:8px;padding:8px;margin:6px 0;font-size:11px;color:#aaa;">'
+                    f'TF: <b>15min</b> | EMA{ec_n}: <b style="color:#4488ff;">${ex.get("ec",0):,.2f}</b> | '
+                    f'EMA{el_n}: <b style="color:#FF8844;">${ex.get("el",0):,.2f}</b> | '
+                    f'RSI: <b style="color:#F5A623;">{rsi_val:.1f}</b>'
                     f'</div>'
                 )
 
